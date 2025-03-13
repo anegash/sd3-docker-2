@@ -6,6 +6,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from diffusers import StableDiffusion3Pipeline
+from huggingface_hub import snapshot_download
 
 class GenerationRequest(BaseModel):
     prompt: str
@@ -14,15 +15,25 @@ class GenerationRequest(BaseModel):
     guidance_scale: float = 7.5
 
 app = FastAPI()
-
 pipe = None
 
 @app.on_event("startup")
 def load_model():
     global pipe
-    model_id = "./models"  # local directory from Docker build
+    HF_TOKEN = os.getenv("HF_TOKEN")
+    if not HF_TOKEN:
+        raise ValueError("HuggingFace token not found! Set HF_TOKEN environment variable.")
+
+    model_path = snapshot_download(
+        repo_id="stabilityai/stable-diffusion-3.5-large",
+        local_dir="/tmp/models",
+        token=HF_TOKEN,
+        local_dir_use_symlinks=False,
+        resume_download=True
+    )
+
     pipe = StableDiffusion3Pipeline.from_pretrained(
-        model_id, torch_dtype=torch.bfloat16, use_safetensors=True
+        model_path, torch_dtype=torch.bfloat16, use_safetensors=True
     )
     pipe.enable_xformers_memory_efficient_attention()
     pipe.to("cuda")
