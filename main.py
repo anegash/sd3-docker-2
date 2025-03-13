@@ -26,7 +26,7 @@ def load_model():
         raise ValueError("HuggingFace token not found! Set HF_TOKEN environment variable.")
 
     model_path = snapshot_download(
-        repo_id="stabilityai/stable-diffusion-3.5-large",
+        repo_id="stabilityai/stable-diffusion-3.5-large-turbo",
         local_dir="/data/models",  # Persistent volume mount point
         token=HF_TOKEN,
         local_dir_use_symlinks=False,
