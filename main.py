@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 # 🟢 Define model storage path inside RunPod volume
-MODEL_DIR = "/runpod-volume/models"
+MODEL_DIR = "/workspace/models"
 
 # Hugging Face Token
 HF_TOKEN = os.getenv("HF_TOKEN")
