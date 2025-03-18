@@ -192,25 +192,121 @@ async def train_lora_endpoint(request: TrainRequest, background_tasks: Backgroun
     background_tasks.add_task(upload_lora_to_s3, local_lora_path, os.path.join(S3_WEIGHTS_PATH, request.output_lora_name))
 
     return {"message": f"LoRA training started for {request.subfolder}!", "output_path": local_lora_path}
-# API Endpoint to load LoRA
-@app.post("/load_lora")
-async def load_lora(lora_model_name: str):
-    lora_path = os.path.join(lora_model_path, lora_model_name)
 
-    if not os.path.exists(lora_path):
-        raise HTTPException(status_code=404, detail="LoRA model not found.")
 
+
+
+def download_lora_from_s3(lora_folder: str):
+    """
+    Downloads LoRA weights from S3 if they are missing locally.
+
+    :param lora_folder: The LoRA folder name in S3.
+    """
+    local_lora_path = os.path.join(lora_model_path, lora_folder)
+    
+    if os.path.exists(local_lora_path):
+        logger.info(f"✅ LoRA weights already available locally: {local_lora_path}")
+        return local_lora_path
+
+    logger.info(f"📥 LoRA weights not found locally. Downloading from S3: {lora_folder}...")
+
+    s3_folder_path = os.path.join(S3_WEIGHTS_PATH, lora_folder).replace("\\", "/")
+    objects = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_folder_path)
+
+    if "Contents" not in objects:
+        raise HTTPException(status_code=404, detail=f"No LoRA weights found in S3 for {lora_folder}.")
+
+    os.makedirs(local_lora_path, exist_ok=True)
+
+    for obj in objects["Contents"]:
+        file_name = obj["Key"].split("/")[-1]
+        local_file_path = os.path.join(local_lora_path, file_name)
+
+        if file_name:  # Ensure it's a file, not just a directory
+            s3_client.download_file(S3_BUCKET, obj["Key"], local_file_path)
+            logger.info(f"✅ Downloaded {obj['Key']} to {local_file_path}")
+
+    return local_lora_path
+
+class GenerateRequest(BaseModel):
+    prompt: str
+    steps: int = 15
+    guidance: float = 7.5
+    lora_model_name: str = None  # Optional LoRA model
+
+
+@app.post("/generate")
+async def generate_image(req_data: GenerateRequest):
+    """
+    Generates an image using Stable Diffusion 3.5 with optional LoRA fine-tuning.
+    If the LoRA model is not found locally, it is downloaded from S3.
+    """
     global pipe
+
+    if pipe is None:
+        logger.error("🚨 Model not loaded. Rejecting request.")
+        raise HTTPException(status_code=500, detail="Model not loaded. Check server logs.")
+
+    # Load LoRA model if provided
+    if req_data.lora_model_name:
+        logger.info(f"🔍 Checking for LoRA model: {req_data.lora_model_name}")
+
+        # Check if LoRA model is available locally, otherwise download from S3
+        local_lora_path = os.path.join(lora_model_path, req_data.lora_model_name)
+        if not os.path.exists(local_lora_path):
+            logger.info(f"📥 LoRA model '{req_data.lora_model_name}' not found locally. Downloading from S3...")
+            download_lora_from_s3(req_data.lora_model_name)
+
+        try:
+            # Load the LoRA model
+            pipe.unet = PeftModel.from_pretrained(pipe.unet, local_lora_path)
+            if torch.cuda.is_available():
+                pipe = pipe.to("cuda")
+            logger.info(f"✅ Loaded LoRA model: {req_data.lora_model_name}")
+
+        except Exception as e:
+            logger.error(f"❌ Error loading LoRA model '{req_data.lora_model_name}': {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to load LoRA model.")
+
     try:
-        pipe.unet = PeftModel.from_pretrained(pipe.unet, lora_path)
-        if torch.cuda.is_available():
-            pipe = pipe.to("cuda")
-        logging.info(f"✅ Loaded LoRA model: {lora_model_name}")
-        return {"message": "LoRA model loaded successfully", "model": lora_model_name}
+        # Validate parameters
+        if not (1 <= req_data.steps <= 150):
+            logger.warning("❌ Invalid steps parameter: %d", req_data.steps)
+            raise HTTPException(status_code=400, detail="steps must be between 1 and 150")
+        if not (0.0 <= req_data.guidance <= 15.0):
+            logger.warning("❌ Invalid guidance parameter: %.2f", req_data.guidance)
+            raise HTTPException(status_code=400, detail="guidance must be between 0.0 and 15.0")
+
+        logger.info(f"🖼️ Generating image with prompt: {req_data.prompt}")
+        gen_start_time = time.time()
+
+        # Generate the image
+        with torch.inference_mode():
+            image = pipe(
+                req_data.prompt,
+                num_inference_steps=req_data.steps,
+                guidance_scale=req_data.guidance,
+            ).images[0]
+
+        gen_end_time = time.time()
+        logger.info(f"✅ Image generated in {gen_end_time - gen_start_time:.2f} seconds!")
+
+        # Convert image to Base64
+        img_io = io.BytesIO()
+        image.save(img_io, format="PNG")
+        img_io.seek(0)
+        base64_img = base64.b64encode(img_io.read()).decode("utf-8")
+
+        logger.info("📤 Sending image response back to client.")
+        return {"image": base64_img}
 
     except Exception as e:
-        logging.error(f"❌ Error loading LoRA model: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load LoRA model.")
+        # Log full error details
+        error_message = f"❌ Error generating image: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Check server logs for details.")
+    
+
 
 # API Health Check
 @app.get("/")
