@@ -1,72 +1,104 @@
-import os
 import torch
 import logging
-from huggingface_hub import snapshot_download
-from fastapi import FastAPI, HTTPException
-from diffusers import StableDiffusion3Pipeline
+import traceback
+import os
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from pathlib import Path
+from diffusers import StableDiffusion3Pipeline
+from PIL import Image
+import io
+import base64
 
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 🟢 Define model storage path inside RunPod volume
-MODEL_DIR = "/workspace/models"
-
-# Hugging Face Token
-HF_TOKEN = os.getenv("HF_TOKEN")
-
-# 🟢 Initialize FastAPI
+# Initialize FastAPI app
 app = FastAPI()
 
-# 🟢 Load or Download Model on Startup
-@app.on_event("startup")
-def load_model():
-    global pipe
+# Define model storage path
+model_id = "stabilityai/stable-diffusion-3.5-large"
+model_dir = "/workspace/models"  # Local model storage directory
+model_path = os.path.join(model_dir, model_id.replace("/", "_"))  # Unique model folder
 
-    # Check if the model exists in persistent storage
-    if Path(MODEL_DIR).exists():
-        logger.info(f"✅ Model found in persistent storage: {MODEL_DIR}")
+# Ensure model directory exists
+os.makedirs(model_dir, exist_ok=True)
+
+# Load or download model
+try:
+    if os.path.exists(model_path):
+        logger.info("📂 Model directory found. Loading from local storage.")
+        pipe = StableDiffusion3Pipeline.from_pretrained(
+            model_path, torch_dtype=torch.float16, variant="fp16"
+        )
     else:
-        logger.info(f"⬇️ Model not found. Downloading to {MODEL_DIR}...")
-        snapshot_download(
-            repo_id="stabilityai/stable-diffusion-3.5-large",
-            local_dir=MODEL_DIR,
-            token=HF_TOKEN,
-            local_dir_use_symlinks=False,
-            resume_download=True
+        logger.info("⬇️ Model not found locally. Downloading to /workspace/models...")
+        pipe = StableDiffusion3Pipeline.from_pretrained(
+            model_id, torch_dtype=torch.float16, variant="fp16", cache_dir=model_path
         )
 
-    # Load the model
-    pipe = StableDiffusion3Pipeline.from_pretrained(
-        MODEL_DIR, torch_dtype=torch.bfloat16, use_safetensors=True
-    )
-    pipe.enable_xformers_memory_efficient_attention()
-    pipe.to("cuda")
-    logger.info("✅ Model Loaded Successfully!")
+    # Move model to GPU if available
+    if torch.cuda.is_available():
+        pipe = pipe.to("cuda")  # Use NVIDIA GPU
+        logger.info("🚀 Running on CUDA")
+    else:
+        pipe = pipe.to("cpu")  # Fallback to CPU
+        logger.warning("⚠️ CUDA not available. Running on CPU (slow performance).")
 
-# 🟢 Define Image Generation Request Model
+except Exception as e:
+    logger.error("🔥 Error loading Stable Diffusion model: %s", str(e))
+    logger.error(traceback.format_exc())
+    pipe = None  # Prevent using an unloaded model
+
+# Define request body model
 class GenerateRequest(BaseModel):
     prompt: str
-    num_inference_steps: int = 30
-    guidance_scale: float = 7.5
+    steps: int = 15
+    guidance: float = 7.5
 
+# API Endpoint (POST request)
 @app.post("/generate")
-def generate(req: GenerateRequest):
+async def generate_image(request: Request, req_data: GenerateRequest):
     if pipe is None:
-        raise HTTPException(status_code=500, detail="Model not loaded")
+        raise HTTPException(status_code=500, detail="Model not loaded. Check server logs.")
 
-    images = pipe(
-        req.prompt,
-        num_inference_steps=req.num_inference_steps,
-        guidance_scale=req.guidance_scale
-    ).images
+    try:
+        # Log request details
+        logger.info("📩 Received request: %s", req_data.dict())
 
-    img = images[0]
+        # Validate parameters
+        if not (1 <= req_data.steps <= 150):
+            raise HTTPException(status_code=400, detail="steps must be between 1 and 150")
+        if not (0.0 <= req_data.guidance <= 15.0):
+            raise HTTPException(status_code=400, detail="guidance must be between 0.0 and 15.0")
 
-    return {"message": "✅ Image generated successfully!"}
+        # Generate the image
+        with torch.inference_mode():
+            image = pipe(
+                req_data.prompt,
+                num_inference_steps=req_data.steps,
+                guidance_scale=req_data.guidance,
+            ).images[0]
 
-@app.get("/healthz")
-def health():
-    return {"status": "ok"}
+        # Convert image to Base64
+        img_io = io.BytesIO()
+        image.save(img_io, format="PNG")
+        img_io.seek(0)
+        base64_img = base64.b64encode(img_io.read()).decode("utf-8")
+
+        return {"image": base64_img}
+
+    except Exception as e:
+        # Log full error details
+        error_message = f"❌ Error generating image: {str(e)}"
+        request_info = f"🔹 Request: {await request.json()}"
+        traceback_info = f"🛠️ Traceback: {traceback.format_exc()}"
+
+        logger.error("\n%s\n%s\n%s", error_message, request_info, traceback_info)
+
+        raise HTTPException(status_code=500, detail="An internal error occurred. Check server logs for details.")
+    
+# Root endpoint
+@app.get("/")
+def home():
+    return {"message": "Stable Diffusion 3.5 API is running on CUDA!"}
