@@ -4,15 +4,19 @@ import traceback
 import os
 import shutil
 import time
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from diffusers import StableDiffusion3Pipeline
-from huggingface_hub import snapshot_download
-from PIL import Image
 import io
-import base64
+import boto3
+import torch.optim as optim
+import torch.nn.functional as F
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from diffusers import StableDiffusion3Pipeline, UNet2DConditionModel
+from transformers import CLIPTextModel, CLIPTokenizer
+from peft import get_peft_model, LoraConfig, PeftModel
+from torch.utils.data import DataLoader, Dataset
+from PIL import Image
+from pydantic import BaseModel
 
-# Initialize logging with timestamps and module names
+# Initialize logging
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(module)s | %(message)s",
     level=logging.INFO,
@@ -20,126 +24,196 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
+# Initialize FastAPI
 app = FastAPI()
 
-# Define model storage path
+# AWS S3 Configuration (Pulled from Runpod Environment Variables)
+S3_BUCKET = "little-legends-dev"
+S3_TRAINING_PATH = "training_data/"
+S3_WEIGHTS_PATH = "lora_models/"
+# Model Paths
 model_id = "stabilityai/stable-diffusion-3.5-large"
-model_dir = "/workspace/models"  # Base directory for storing models
-model_path = os.path.join(model_dir, model_id.replace("/", "_"))  # Unique folder
+model_dir = "/workspace/models"
+model_path = os.path.join(model_dir, model_id.replace("/", "_"))
+lora_model_path = "/workspace/lora_models"
+os.makedirs(lora_model_path, exist_ok=True)
 
-# Log system information
-logger.info("🔥 Initializing Stable Diffusion API...")
-logger.info(f"🚀 Torch version: {torch.__version__}")
-logger.info(f"🔧 CUDA Available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    logger.info(f"🖥️ Using GPU: {torch.cuda.get_device_name(0)}")
-    logger.info(f"🔥 GPU Memory Allocated: {torch.cuda.memory_allocated()} bytes")
-    logger.info(f"🔥 GPU Memory Cached: {torch.cuda.memory_reserved()} bytes")
 
-# Ensure model directory exists
-os.makedirs(model_dir, exist_ok=True)
+# Load AWS credentials from environment variables
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")  # Default to us-east-1 if not set
 
-# Download model if not found or incomplete
-model_index_file = os.path.join(model_path, "model_index.json")
+# Initialize S3 Client with credentials
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION
+)
 
-if not os.path.exists(model_index_file):
-    if os.path.exists(model_path):
-        logger.warning("⚠️ Model folder exists but is incomplete. Removing and redownloading...")
-        shutil.rmtree(model_path)  # Remove incomplete model directory
-
-    logger.info("⬇️ Downloading model to /workspace/models...")
-    start_time = time.time()
-    snapshot_download(repo_id=model_id, local_dir=model_path, local_dir_use_symlinks=False)
-    end_time = time.time()
-    logger.info(f"✅ Model downloaded successfully in {end_time - start_time:.2f} seconds!")
-
-# Load model
+# Initialize model
 try:
-    logger.info("🛠️ Loading the model into memory...")
-    start_time = time.time()
-
+    logger.info("🔥 Initializing Stable Diffusion API...")
     pipe = StableDiffusion3Pipeline.from_pretrained(
         model_path, torch_dtype=torch.float16, variant="fp16"
     )
 
-    end_time = time.time()
-    logger.info(f"✅ Model loaded successfully in {end_time - start_time:.2f} seconds!")
-
-    # Move model to GPU if available
     if torch.cuda.is_available():
-        pipe = pipe.to("cuda")  # Use NVIDIA GPU
+        pipe = pipe.to("cuda")
         logger.info("🚀 Running on CUDA")
     else:
-        pipe = pipe.to("cpu")  # Fallback to CPU
-        logger.warning("⚠️ CUDA not available. Running on CPU (slow performance).")
+        pipe = pipe.to("cpu")
+        logger.warning("⚠️ Running on CPU (slow performance).")
 
 except Exception as e:
     logger.error("🔥 Error loading Stable Diffusion model: %s", str(e))
     logger.error(traceback.format_exc())
     pipe = None  # Prevent API from running with an unloaded model
 
-# Define request body model
-class GenerateRequest(BaseModel):
-    prompt: str
-    steps: int = 15
-    guidance: float = 7.5
+# Helper function to download images from S3
+def download_images_from_s3(local_path: str, subfolder: str):
+    """
+    Downloads images from S3 stored in a specific child's subfolder.
 
-# API Endpoint (POST request)
-@app.post("/generate")
-async def generate_image(request: Request, req_data: GenerateRequest):
-    if pipe is None:
-        logger.error("🚨 Model not loaded. Rejecting request.")
-        raise HTTPException(status_code=500, detail="Model not loaded. Check server logs.")
+    :param local_path: Local directory where images will be saved.
+    :param subfolder: The specific child's subfolder in S3.
+    """
+    # Construct full S3 path with the child's subfolder
+    s3_folder_path = os.path.join(S3_TRAINING_PATH, subfolder).replace("\\", "/")
 
+    os.makedirs(local_path, exist_ok=True)
+    objects = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_folder_path)
+
+    if "Contents" not in objects:
+        raise HTTPException(status_code=404, detail=f"No images found in S3 for {subfolder}.")
+
+    for obj in objects["Contents"]:
+        file_name = obj["Key"].split("/")[-1]
+        local_file_path = os.path.join(local_path, file_name)
+
+        if file_name:  # Ensure it's a file, not just a directory
+            s3_client.download_file(S3_BUCKET, obj["Key"], local_file_path)
+            logging.info(f"✅ Downloaded {obj['Key']} to {local_file_path}")
+
+# Custom dataset for training
+class ImageDataset(Dataset):
+    def __init__(self, image_folder):
+        self.image_folder = image_folder
+        self.image_files = [f for f in os.listdir(image_folder) if f.endswith((".png", ".jpg", ".jpeg"))]
+        self.tokenizer = CLIPTokenizer.from_pretrained(model_path)
+        self.captions = ["A portrait of a child."] * len(self.image_files)
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.image_folder, self.image_files[idx])
+        image = Image.open(img_path).convert("RGB").resize((512, 512))
+        image = torch.tensor(torchvision.transforms.ToTensor()(image))
+
+        inputs = self.tokenizer(self.captions[idx], return_tensors="pt", padding=True)
+        return image, inputs["input_ids"]
+
+# LoRA training function
+def train_lora(dataset_path, output_lora_path, steps=1000, lr=1e-4):
+    logging.info("🚀 Starting LoRA fine-tuning...")
+    
+    # Load base model components
+    unet = UNet2DConditionModel.from_pretrained(model_path, subfolder="unet")
+    text_encoder = CLIPTextModel.from_pretrained(model_path, subfolder="text_encoder")
+
+    # Load dataset
+    dataset = ImageDataset(dataset_path)
+    dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+
+    # Apply LoRA
+    config = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        target_modules=["to_q", "to_v"]
+    )
+    unet = get_peft_model(unet, config)
+    optimizer = optim.AdamW(unet.parameters(), lr=lr)
+
+    # Training loop
+    unet.train()
+    for step, (images, captions) in enumerate(dataloader):
+        if step >= steps:
+            break
+
+        optimizer.zero_grad()
+        text_embeddings = text_encoder(captions).last_hidden_state
+        loss = F.mse_loss(unet(images), text_embeddings)
+        loss.backward()
+        optimizer.step()
+
+        if step % 100 == 0:
+            logging.info(f"🔄 Step {step}/{steps}: Loss = {loss.item()}")
+
+    # Save LoRA weights
+    os.makedirs(output_lora_path, exist_ok=True)
+    unet.save_pretrained(output_lora_path)
+    logging.info("✅ LoRA fine-tuning complete!")
+
+# Upload LoRA model to S3
+def upload_lora_to_s3(local_path, s3_path):
+    for file in os.listdir(local_path):
+        local_file = os.path.join(local_path, file)
+        s3_file = os.path.join(s3_path, file)
+        s3_client.upload_file(local_file, S3_BUCKET, s3_file)
+        logging.info(f"📤 Uploaded {local_file} to S3 at {s3_file}")
+
+# API Request Models
+class TrainRequest(BaseModel):
+    subfolder: str  # The child's subfolder in S3
+    output_lora_name: str  # Name of the trained LoRA model
+    steps: int = 1000
+    lr: float = 1e-4
+
+@app.post("/train_lora")
+async def train_lora_endpoint(request: TrainRequest, background_tasks: BackgroundTasks):
+    local_dataset_path = os.path.join("/workspace/training_data", request.subfolder)
+    local_lora_path = os.path.join(lora_model_path, request.output_lora_name)
+
+    # Download dataset from S3
     try:
-        # Log request details
-        logger.info(f"📩 Received request: {req_data.dict()}")
+        logging.info(f"📥 Downloading images for {request.subfolder} from S3...")
+        download_images_from_s3(local_dataset_path, request.subfolder)
+    except Exception as e:
+        logging.error(f"❌ Error downloading images: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to download images.")
 
-        # Validate parameters
-        if not (1 <= req_data.steps <= 150):
-            logger.warning("❌ Invalid steps parameter: %d", req_data.steps)
-            raise HTTPException(status_code=400, detail="steps must be between 1 and 150")
-        if not (0.0 <= req_data.guidance <= 15.0):
-            logger.warning("❌ Invalid guidance parameter: %.2f", req_data.guidance)
-            raise HTTPException(status_code=400, detail="guidance must be between 0.0 and 15.0")
+    # Train LoRA in the background
+    background_tasks.add_task(train_lora, local_dataset_path, local_lora_path, request.steps, request.lr)
 
-        logger.info("🖼️ Generating image with prompt: %s", req_data.prompt)
-        gen_start_time = time.time()
+    # Upload weights to S3 after training
+    background_tasks.add_task(upload_lora_to_s3, local_lora_path, os.path.join(S3_WEIGHTS_PATH, request.output_lora_name))
 
-        # Generate the image
-        with torch.inference_mode():
-            image = pipe(
-                req_data.prompt,
-                num_inference_steps=req_data.steps,
-                guidance_scale=req_data.guidance,
-            ).images[0]
+    return {"message": f"LoRA training started for {request.subfolder}!", "output_path": local_lora_path}
+# API Endpoint to load LoRA
+@app.post("/load_lora")
+async def load_lora(lora_model_name: str):
+    lora_path = os.path.join(lora_model_path, lora_model_name)
 
-        gen_end_time = time.time()
-        logger.info(f"✅ Image generated in {gen_end_time - gen_start_time:.2f} seconds!")
+    if not os.path.exists(lora_path):
+        raise HTTPException(status_code=404, detail="LoRA model not found.")
 
-        # Convert image to Base64
-        img_io = io.BytesIO()
-        image.save(img_io, format="PNG")
-        img_io.seek(0)
-        base64_img = base64.b64encode(img_io.read()).decode("utf-8")
-
-        logger.info("📤 Sending image response back to client.")
-
-        return {"image": base64_img}
+    global pipe
+    try:
+        pipe.unet = PeftModel.from_pretrained(pipe.unet, lora_path)
+        if torch.cuda.is_available():
+            pipe = pipe.to("cuda")
+        logging.info(f"✅ Loaded LoRA model: {lora_model_name}")
+        return {"message": "LoRA model loaded successfully", "model": lora_model_name}
 
     except Exception as e:
-        # Log full error details
-        error_message = f"❌ Error generating image: {str(e)}"
-        request_info = f"🔹 Request: {await request.json()}"
-        traceback_info = f"🛠️ Traceback: {traceback.format_exc()}"
+        logging.error(f"❌ Error loading LoRA model: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load LoRA model.")
 
-        logger.error("\n%s\n%s\n%s", error_message, request_info, traceback_info)
-
-        raise HTTPException(status_code=500, detail="An internal error occurred. Check server logs for details.")
-    
-# Root endpoint
+# API Health Check
 @app.get("/")
 def home():
     logger.info("🛠️ Health check requested.")
-    return {"message": "Stable Diffusion 3.5 API is running on CUDA!"}
+    return {"message": "Stable Diffusion 3.5 API is running with LoRA support!"}

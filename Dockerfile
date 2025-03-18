@@ -16,7 +16,10 @@ RUN pip install --no-cache-dir \
     boto3 \
     huggingface_hub[cli] \
     protobuf \
-    sentencepiece
+    sentencepiece \
+    torchvision \
+    peft \
+    safetensors
 
 # Create a persistent directory for storing the model
 RUN mkdir -p /workspace/models
