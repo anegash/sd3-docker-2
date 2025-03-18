@@ -2,9 +2,11 @@ import torch
 import logging
 import traceback
 import os
+import shutil
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from diffusers import StableDiffusion3Pipeline
+from huggingface_hub import snapshot_download
 from PIL import Image
 import io
 import base64
@@ -18,24 +20,29 @@ app = FastAPI()
 
 # Define model storage path
 model_id = "stabilityai/stable-diffusion-3.5-large"
-model_dir = "/workspace/models"  # Local model storage directory
-model_path = os.path.join(model_dir, model_id.replace("/", "_"))  # Unique model folder
+model_dir = "/workspace/models"  # Base directory for storing models
+model_path = os.path.join(model_dir, model_id.replace("/", "_"))  # Unique folder
 
 # Ensure model directory exists
 os.makedirs(model_dir, exist_ok=True)
 
-# Load or download model
-try:
+# Download model if not found or incomplete
+model_index_file = os.path.join(model_path, "model_index.json")
+
+if not os.path.exists(model_index_file):
     if os.path.exists(model_path):
-        logger.info("📂 Model directory found. Loading from local storage.")
-        pipe = StableDiffusion3Pipeline.from_pretrained(
-            model_path, torch_dtype=torch.float16, variant="fp16"
-        )
-    else:
-        logger.info("⬇️ Model not found locally. Downloading to /workspace/models...")
-        pipe = StableDiffusion3Pipeline.from_pretrained(
-            model_id, torch_dtype=torch.float16, variant="fp16", cache_dir=model_path
-        )
+        logger.warning("⚠️ Model folder exists but is incomplete. Removing and redownloading...")
+        shutil.rmtree(model_path)  # Remove incomplete model directory
+
+    logger.info("⬇️ Downloading model to /workspace/models...")
+    snapshot_download(repo_id=model_id, local_dir=model_path, local_dir_use_symlinks=False)
+    logger.info("✅ Model downloaded successfully!")
+
+# Load model
+try:
+    pipe = StableDiffusion3Pipeline.from_pretrained(
+        model_path, torch_dtype=torch.float16, variant="fp16"
+    )
 
     # Move model to GPU if available
     if torch.cuda.is_available():
@@ -48,7 +55,7 @@ try:
 except Exception as e:
     logger.error("🔥 Error loading Stable Diffusion model: %s", str(e))
     logger.error(traceback.format_exc())
-    pipe = None  # Prevent using an unloaded model
+    pipe = None  # Prevent API from running with an unloaded model
 
 # Define request body model
 class GenerateRequest(BaseModel):
