@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir \
     sentencepiece
 
 # Create a persistent directory for storing the model
-RUN mkdir -p /runpod-volume/models
+RUN mkdir -p /workspace/models
 
 # Set working directory
 WORKDIR /app
