@@ -18,7 +18,9 @@ from pydantic import BaseModel
 
 import torchvision.transforms as transforms
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, login
+
+
 
 
 # Initialize logging
@@ -28,6 +30,16 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
+
+
+HF_TOKEN = os.getenv("HF_TOKEN")  # Load from environment variable (recommended)
+
+if HF_TOKEN:
+    login(token=HF_TOKEN)
+    logger.info("🔑 Hugging Face authentication successful!")
+else:
+    logger.error("❌ Hugging Face token is missing! Set the HF_TOKEN environment variable.")
+    raise RuntimeError("Hugging Face authentication required.")
 
 # Initialize FastAPI
 app = FastAPI()
