@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 from pydantic import BaseModel
 
+import torchvision.transforms as transforms
+
 # Initialize logging
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(module)s | %(message)s",
@@ -110,7 +112,7 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         img_path = os.path.join(self.image_folder, self.image_files[idx])
         image = Image.open(img_path).convert("RGB").resize((512, 512))
-        image = torch.tensor(torchvision.transforms.ToTensor()(image))
+        image = transforms.ToTensor()(image)
 
         inputs = self.tokenizer(self.captions[idx], return_tensors="pt", padding=True)
         return image, inputs["input_ids"]
@@ -154,7 +156,7 @@ def train_lora(dataset_path, output_lora_path, steps=1000, lr=1e-4):
 
     # Save LoRA weights
     os.makedirs(output_lora_path, exist_ok=True)
-    unet.save_pretrained(output_lora_path)
+    unet.save_pretrained(output_lora_path, torch_dtype=torch.float16)
     logging.info("✅ LoRA fine-tuning complete!")
 
 # Upload LoRA model to S3
@@ -174,25 +176,50 @@ class TrainRequest(BaseModel):
 
 @app.post("/train_lora")
 async def train_lora_endpoint(request: TrainRequest, background_tasks: BackgroundTasks):
+    """
+    Starts a LoRA fine-tuning job in the background.
+
+    - Downloads dataset from S3.
+    - Starts the training job in the background.
+    - Provides real-time logging at each step.
+    """
+
+    logging.info(f"🚀 Received training request for LoRA model: {request.output_lora_name}")
+    logging.info(f"📂 Subfolder in S3: {request.subfolder}")
+    logging.info(f"📌 Training Steps: {request.steps}, Learning Rate: {request.lr}")
+
+    # Define local paths
     local_dataset_path = os.path.join("/workspace/training_data", request.subfolder)
     local_lora_path = os.path.join(lora_model_path, request.output_lora_name)
 
-    # Download dataset from S3
+    logging.info(f"🛠️ Local dataset path: {local_dataset_path}")
+    logging.info(f"🛠️ Local LoRA weights path: {local_lora_path}")
+
+    # Step 1: Download dataset from S3
     try:
-        logging.info(f"📥 Downloading images for {request.subfolder} from S3...")
+        logging.info(f"📥 Attempting to download dataset from S3 (Bucket: {S3_BUCKET}, Path: {S3_TRAINING_PATH}{request.subfolder})...")
         download_images_from_s3(local_dataset_path, request.subfolder)
+        logging.info(f"✅ Dataset downloaded successfully to {local_dataset_path}")
     except Exception as e:
-        logging.error(f"❌ Error downloading images: {str(e)}")
+        logging.error(f"❌ ERROR: Failed to download dataset from S3: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to download images.")
 
-    # Train LoRA in the background
-    background_tasks.add_task(train_lora, local_dataset_path, local_lora_path, request.steps, request.lr)
+    # Step 2: Start training LoRA in the background
+    try:
+        logging.info(f"🛠️ Starting LoRA fine-tuning for {request.output_lora_name}...")
+        background_tasks.add_task(train_lora, local_dataset_path, local_lora_path, request.steps, request.lr)
+        logging.info(f"✅ Training process started in the background for {request.output_lora_name}")
+    except Exception as e:
+        logging.error(f"❌ ERROR: Failed to start training: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to start LoRA training.")
 
-    # Upload weights to S3 after training
-    background_tasks.add_task(upload_lora_to_s3, local_lora_path, os.path.join(S3_WEIGHTS_PATH, request.output_lora_name))
-
-    return {"message": f"LoRA training started for {request.subfolder}!", "output_path": local_lora_path}
-
+    return {
+        "message": f"LoRA training started for {request.subfolder}!",
+        "output_path": local_lora_path,
+        "s3_subfolder": request.subfolder,
+        "training_steps": request.steps,
+        "learning_rate": request.lr
+    }
 
 
 
@@ -259,7 +286,8 @@ async def generate_image(req_data: GenerateRequest):
 
         try:
             # Load the LoRA model
-            pipe.unet = PeftModel.from_pretrained(pipe.unet, local_lora_path)
+            pipe.unet = PeftModel.from_pretrained(local_lora_path)
+            pipe.unet = pipe.unet.merge_and_unload() 
             if torch.cuda.is_available():
                 pipe = pipe.to("cuda")
             logger.info(f"✅ Loaded LoRA model: {req_data.lora_model_name}")
