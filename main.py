@@ -18,6 +18,9 @@ from pydantic import BaseModel
 
 import torchvision.transforms as transforms
 
+from huggingface_hub import snapshot_download
+
+
 # Initialize logging
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(module)s | %(message)s",
@@ -54,7 +57,31 @@ s3_client = boto3.client(
     region_name=AWS_REGION
 )
 
-# Initialize model
+
+# Ensure model directory exists
+os.makedirs(model_dir, exist_ok=True)
+
+# Check if the model is missing
+model_index_file = os.path.join(model_path, "model_index.json")
+
+if not os.path.exists(model_index_file):
+    logger.warning(f"⚠️ Model not found at {model_path}. Downloading from Hugging Face...")
+    
+    # Remove incomplete downloads if any
+    if os.path.exists(model_path):
+        shutil.rmtree(model_path)
+
+    # Download the model from Hugging Face
+    try:
+        start_time = time.time()
+        snapshot_download(repo_id=model_id, local_dir=model_path, local_dir_use_symlinks=False)
+        end_time = time.time()
+        logger.info(f"✅ Model downloaded successfully in {end_time - start_time:.2f} seconds!")
+    except Exception as e:
+        logger.error(f"❌ Error downloading model: {str(e)}")
+        raise RuntimeError("Failed to download model.")
+
+# Load the model
 try:
     logger.info("🔥 Initializing Stable Diffusion API...")
     pipe = StableDiffusion3Pipeline.from_pretrained(
