@@ -63,11 +63,12 @@ def load_models():
 
     logger.info("✅ Models loaded successfully!")
 
-# Dataset class
+# Updated Dataset class that accepts a special token based on the child's name
 class ImageDataset(Dataset):
-    def __init__(self, folder, tokenizer):
+    def __init__(self, folder, tokenizer, child_token="[child]"):
         self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith((".png", ".jpg", ".jpeg"))]
         self.tokenizer = tokenizer
+        self.child_token = child_token  # e.g., "[Alice]"
         self.transform = transforms.Compose([
             transforms.Resize((512, 512)),
             transforms.ToTensor(),
@@ -80,9 +81,11 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         image = Image.open(self.files[idx]).convert("RGB")
         image = self.transform(image)
-        caption = "A portrait of a child."
+        # Use the special token in the caption
+        caption = f"A portrait of {self.child_token}."
         tokens = self.tokenizer(caption, padding="max_length", max_length=77, return_tensors="pt").input_ids.squeeze()
         return image, tokens
+
 
 # Download from S3
 def download_images_from_s3(local_path, subfolder):
@@ -105,12 +108,19 @@ def upload_lora_to_s3(local_path, s3_subfolder):
 
 
 # Train LoRA correctly
-def train_lora(dataset_path, output_path, steps, lr):
+# Updated training function with an extra parameter "child_token"
+def train_lora(dataset_path, output_path, steps, lr, child_token):
     logger.info("🚀 Starting LoRA fine-tuning...")
 
-    # ✅ Load Dataset
+    # Ensure the special token is in the tokenizer
+    if child_token not in tokenizer.get_vocab():
+        tokenizer.add_tokens(child_token)
+        text_encoder.resize_token_embeddings(len(tokenizer))
+        logger.info(f"✅ Added special token {child_token} to the tokenizer.")
+
+    # ✅ Load Dataset with the child's special token
     logger.info(f"📂 Loading dataset from: {dataset_path}")
-    dataset = ImageDataset(dataset_path, tokenizer)
+    dataset = ImageDataset(dataset_path, tokenizer, child_token)
     loader = DataLoader(dataset, batch_size=2, shuffle=True)
     logger.info(f"✅ Dataset loaded. Total samples: {len(dataset)}")
 
@@ -119,14 +129,11 @@ def train_lora(dataset_path, output_path, steps, lr):
     # ✅ Load UNet using model_index.json
     logger.info("🔍 Loading UNet model from model_index.json...")
     config_path = os.path.join(model_dir, "model_index.json")
-    
     if not os.path.exists(config_path):
         logger.error(f"❌ UNet config not found: {config_path}")
         raise ValueError(f"UNet config not found: {config_path}")
-
     with open(config_path, "r") as f:
         model_config = json.load(f)
-
     unet = get_peft_model(
         UNet2DConditionModel.from_config(model_config).to("cuda"), config
     )
@@ -137,22 +144,18 @@ def train_lora(dataset_path, output_path, steps, lr):
     # ✅ Load VAE model correctly using AutoencoderKL
     logger.info("🔍 Loading VAE model...")
     vae_path = os.path.join(model_dir, "vae")
-    
     if not os.path.exists(vae_path):
         logger.error(f"❌ VAE model not found at {vae_path}")
         raise ValueError(f"VAE model not found at {vae_path}")
-
     vae = AutoencoderKL.from_pretrained(vae_path).to("cuda")
     logger.info("✅ VAE model loaded successfully.")
 
     # ✅ Load text_encoder_2
     logger.info("🔍 Loading text encoder...")
     text_encoder_path = os.path.join(model_dir, "text_encoder_2")
-    
     if not os.path.exists(text_encoder_path):
         logger.error(f"❌ Text encoder not found at {text_encoder_path}")
         raise ValueError(f"Text encoder not found at {text_encoder_path}")
-
     text_encoder = CLIPTextModel.from_pretrained(text_encoder_path).to("cuda")
     logger.info("✅ Text encoder loaded successfully.")
 
@@ -166,36 +169,29 @@ def train_lora(dataset_path, output_path, steps, lr):
 
         with torch.no_grad():
             logger.info(f"🔄 Step {step}: Generating latents...")
-            
-            # ✅ FIX: Convert images to float32 before passing to VAE
+            # Convert images to float32 before passing to VAE
             latents = vae.encode(images.to(torch.float32)).latent_dist.sample()
-            
-            # ✅ Ensure latents have 4 channels (SD3 models might use 16)
+            # Ensure latents have 4 channels (SD3 models might use 16)
             if latents.shape[1] != 4:
                 logger.warning(f"⚠️ Latent space mismatch: expected 4 channels, got {latents.shape[1]}")
-                latents = latents[:, :4, :, :]  # Take first 4 channels
-
+                latents = latents[:, :4, :, :]
             latents = latents * vae.config.scaling_factor  # Apply correct scaling
             
             noise = torch.randn_like(latents)
             timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda").long()
-
-            # ✅ FIX: Manually apply noise since scheduler does NOT support `add_noise()`
+            # Manually apply noise since scheduler does NOT support `add_noise()`
             noisy_latents = latents + noise * timesteps.reshape(-1, 1, 1, 1).to(noise.dtype)
 
             logger.info(f"🔄 Step {step}: Generating text embeddings...")
-            encoder_states = text_encoder(tokens)[0]  # Use text_encoder_2
+            encoder_states = text_encoder(tokens)[0]
 
         optimizer.zero_grad()
         logger.info(f"🔄 Step {step}: Forward pass through UNet...")
-        
-        # ✅ Ensure the UNet receives a correctly shaped latent space
         if noisy_latents.shape[1] != 4:
             logger.error(f"❌ UNet input shape mismatch: expected 4 channels, got {noisy_latents.shape[1]}")
             raise ValueError(f"UNet input shape mismatch: expected 4 channels, got {noisy_latents.shape[1]}")
 
         pred_noise = unet(noisy_latents, timesteps, encoder_states).sample
-
         loss = torch.nn.functional.mse_loss(pred_noise, noise)
         loss.backward()
         optimizer.step()
@@ -211,13 +207,11 @@ def train_lora(dataset_path, output_path, steps, lr):
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
 
-
-
-
-# Request Models
+# Updated Train Request Model to include the child's name
 class TrainRequest(BaseModel):
     subfolder: str
     output_lora_name: str
+    child_name: str  # Pass the child's name (e.g., "Alice")
     steps: int = 1000
     lr: float = 1e-4
 
@@ -225,11 +219,14 @@ class TrainRequest(BaseModel):
 def train_lora_endpoint(req: TrainRequest, background_tasks: BackgroundTasks):
     local_data = f"/workspace/training_data/{req.subfolder}"
     local_lora = os.path.join(lora_model_path, req.output_lora_name)
-
+    # Convert the child's name into a special token, e.g., "Alice" becomes "[Alice]"
+    child_token = f"[{req.child_name}]"
+    
     download_images_from_s3(local_data, req.subfolder)
-    background_tasks.add_task(train_lora, local_data, local_lora, req.steps, req.lr)
+    background_tasks.add_task(train_lora, local_data, local_lora, req.steps, req.lr, child_token)
 
-    return {"message": f"Training started for {req.output_lora_name}"}
+    return {"message": f"Training started for {req.output_lora_name} with token {child_token}"}
+
 
 class GenerateRequest(BaseModel):
     prompt: str
@@ -272,7 +269,7 @@ def generate_image(req: GenerateRequest):
         logger.error(f"❌ Image generation failed: {e}")
         return {"error": f"Image generation failed: {e}"}
     
-    
+
 
 @app.get("/")
 def health_check():
