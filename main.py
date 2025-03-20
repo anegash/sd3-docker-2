@@ -103,6 +103,7 @@ def upload_lora_to_s3(local_path, s3_subfolder):
         s3_client.upload_file(os.path.join(local_path, file), S3_BUCKET, f"{S3_WEIGHTS_PATH}/{s3_subfolder}/{file}")
 
 
+
 # Train LoRA correctly
 def train_lora(dataset_path, output_path, steps, lr):
     logger.info("🚀 Starting LoRA fine-tuning...")
@@ -170,12 +171,8 @@ def train_lora(dataset_path, output_path, steps, lr):
             noise = torch.randn_like(latents)
             timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda").long()
 
-            # ✅ FIX: Ensure noise is added correctly based on scheduler type
-            if isinstance(pipe.scheduler, SchedulerMixin):
-                noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
-            else:
-                logger.warning(f"⚠️ Scheduler '{type(pipe.scheduler).__name__}' does not support add_noise. Using fallback.")
-                noisy_latents = latents + noise  # Fallback: Simple noise addition
+            # ✅ FIX: Manually apply noise since scheduler does NOT support `add_noise()`
+            noisy_latents = latents + noise * timesteps.reshape(-1, 1, 1, 1).to(noise.dtype)
 
             logger.info(f"🔄 Step {step}: Generating text embeddings...")
             encoder_states = text_encoder(tokens)[0]  # Use text_encoder_2
@@ -198,6 +195,9 @@ def train_lora(dataset_path, output_path, steps, lr):
     logger.info(f"📤 Uploading LoRA model to S3: {output_path}")
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
+
+
+    
 # Request Models
 class TrainRequest(BaseModel):
     subfolder: str
