@@ -44,7 +44,7 @@ os.makedirs(lora_model_path, exist_ok=True)
 
 @app.on_event("startup")
 def load_models():
-    global pipe, tokenizer, vae, text_encoder
+    global pipe, tokenizer, vae, text_encoder, model_dir
 
     HF_TOKEN = os.getenv("HF_TOKEN")
     model_dir = snapshot_download(repo_id=model_id, local_dir=model_dir, token=HF_TOKEN, resume_download=True)

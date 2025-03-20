@@ -11,3 +11,4 @@ docker push antenehmtk/sd3-docker-lazy-lora:latest
 
 
 apt update && apt install -y git
+ssh-keygen -t rsa -b 4096
