@@ -61,11 +61,12 @@ os.makedirs(lora_model_path, exist_ok=True)
 # Updated main.py snippet using persistent storage
 @app.on_event("startup")
 def load_model():
-    global pipe
+    global pipe, model_dir  # Add 'model_dir' to the global scope
     HF_TOKEN = os.getenv("HF_TOKEN")
     if not HF_TOKEN:
         raise ValueError("HuggingFace token not found! Set HF_TOKEN environment variable.")
 
+    # Use global model_dir correctly
     model_dir = snapshot_download(
         repo_id=model_id,
         local_dir=model_dir,  # Persistent volume mount point
@@ -74,13 +75,18 @@ def load_model():
         resume_download=True
     )
 
+    print(f"✅ Model downloaded to: {model_dir}")
+
     pipe = StableDiffusion3Pipeline.from_pretrained(
         model_dir, torch_dtype=torch.bfloat16, use_safetensors=True
     )
     pipe.enable_xformers_memory_efficient_attention()
     pipe.to("cuda")
+    
+    print("🔥 Model loaded successfully!")
 
 
+    
 # Helper function to download images from S3
 def download_images_from_s3(local_path: str, subfolder: str):
     """
