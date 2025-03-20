@@ -68,7 +68,7 @@ class ImageDataset(Dataset):
     def __init__(self, folder, tokenizer, child_token="[child]"):
         self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith((".png", ".jpg", ".jpeg"))]
         self.tokenizer = tokenizer
-        self.child_token = child_token  # e.g., "[Alice]"
+        self.child_token = child_token
         self.transform = transforms.Compose([
             transforms.Resize((512, 512)),
             transforms.ToTensor(),
@@ -81,11 +81,16 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         image = Image.open(self.files[idx]).convert("RGB")
         image = self.transform(image)
-        # Use the special token in the caption
+        
+        # Use the child's special token in the caption
         caption = f"A portrait of {self.child_token}."
+        
+        # ✅ Ensure token exists before tokenization
+        if self.child_token not in tokenizer.get_vocab():
+            raise ValueError(f"Token '{self.child_token}' is missing in the tokenizer vocabulary.")
+        
         tokens = self.tokenizer(caption, padding="max_length", max_length=77, return_tensors="pt").input_ids.squeeze()
         return image, tokens
-
 
 # Download from S3
 def download_images_from_s3(local_path, subfolder):
@@ -183,6 +188,9 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
             noisy_latents = latents + noise * timesteps.reshape(-1, 1, 1, 1).to(noise.dtype)
 
             logger.info(f"🔄 Step {step}: Generating text embeddings...")
+
+            logger.info(f"📝 Tokenized caption for training: {tokens}")
+            logger.info(f"🔢 Token indices range: {tokens.min().item()} - {tokens.max().item()}")
             encoder_states = text_encoder(tokens)[0]
 
         optimizer.zero_grad()
@@ -206,7 +214,7 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
     logger.info(f"📤 Uploading LoRA model to S3: {output_path}")
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
-    
+
 
 # Updated Train Request Model to include the child's name
 class TrainRequest(BaseModel):
