@@ -99,6 +99,8 @@ def download_images_from_s3(local_path, subfolder):
 def upload_lora_to_s3(local_path, s3_subfolder):
     for file in os.listdir(local_path):
         s3_client.upload_file(os.path.join(local_path, file), S3_BUCKET, f"{S3_WEIGHTS_PATH}/{s3_subfolder}/{file}")
+
+
 # Train LoRA correctly
 def train_lora(dataset_path, output_path, steps, lr):
     logger.info("🚀 Starting LoRA fine-tuning...")
@@ -111,7 +113,7 @@ def train_lora(dataset_path, output_path, steps, lr):
 
     config = LoraConfig(r=4, lora_alpha=16, target_modules=["to_q", "to_v"])
 
-    # ✅ Load UNet using model_index.json (since config.json is missing)
+    # ✅ Load UNet using model_index.json
     logger.info("🔍 Loading UNet model from model_index.json...")
     config_path = os.path.join(model_dir, "model_index.json")
     
@@ -140,7 +142,7 @@ def train_lora(dataset_path, output_path, steps, lr):
     vae = AutoencoderKL.from_pretrained(vae_path).to("cuda")
     logger.info("✅ VAE model loaded successfully.")
 
-    # ✅ Load text_encoder_2 (most likely correct encoder for this model)
+    # ✅ Load text_encoder_2
     logger.info("🔍 Loading text encoder...")
     text_encoder_path = os.path.join(model_dir, "text_encoder_2")
     
@@ -161,7 +163,8 @@ def train_lora(dataset_path, output_path, steps, lr):
 
         with torch.no_grad():
             logger.info(f"🔄 Step {step}: Generating latents...")
-            latents = vae.encode(images.to(torch.float16)).latent_dist.sample() * vae.config.scaling_factor
+            # **✅ FIX: Convert images to float32 before passing to VAE**
+            latents = vae.encode(images.to(torch.float32)).latent_dist.sample() * vae.config.scaling_factor
             noise = torch.randn_like(latents)
             timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda").long()
             noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
@@ -187,8 +190,8 @@ def train_lora(dataset_path, output_path, steps, lr):
     logger.info(f"📤 Uploading LoRA model to S3: {output_path}")
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
-
     
+
 # Request Models
 class TrainRequest(BaseModel):
     subfolder: str
