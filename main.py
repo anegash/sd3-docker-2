@@ -29,21 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI
-app = FastAPI()
-
-# AWS S3 Configuration (Pulled from Runpod Environment Variables)
-S3_BUCKET = "little-legends-dev"
-S3_TRAINING_PATH = "training_data/"
-S3_WEIGHTS_PATH = "lora_models/"
-# Model Paths
-model_id = "stabilityai/stable-diffusion-3.5-large"
-model_dir = "/workspace/models"
-model_path = os.path.join(model_dir, model_id.replace("/", "_"))
-lora_model_path = "/workspace/lora_models"
-os.makedirs(lora_model_path, exist_ok=True)
-
-
 # Load AWS credentials from environment variables
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -57,6 +42,23 @@ s3_client = boto3.client(
     region_name=AWS_REGION
 )
 
+
+# Initialize FastAPI
+app = FastAPI()
+
+# AWS S3 Configuration (Pulled from Runpod Environment Variables)
+S3_BUCKET = "little-legends-dev"
+S3_TRAINING_PATH = "training_data/"
+S3_WEIGHTS_PATH = "lora_models/"
+# Model Paths
+model_id = "stabilityai/stable-diffusion-3.5-large"
+model_dir = "/workspace/models"
+# model_path = os.path.join(model_dir, model_id.replace("/", "_"))
+lora_model_path = "/workspace/lora_models"
+os.makedirs(lora_model_path, exist_ok=True)
+
+
+
 # Updated main.py snippet using persistent storage
 @app.on_event("startup")
 def load_model():
@@ -65,7 +67,7 @@ def load_model():
     if not HF_TOKEN:
         raise ValueError("HuggingFace token not found! Set HF_TOKEN environment variable.")
 
-    model_path = snapshot_download(
+    model_dir = snapshot_download(
         repo_id="stabilityai/stable-diffusion-3.5-large",
         local_dir=model_dir,  # Persistent volume mount point
         token=HF_TOKEN,
@@ -74,7 +76,7 @@ def load_model():
     )
 
     pipe = StableDiffusion3Pipeline.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, use_safetensors=True
+        model_dir, torch_dtype=torch.bfloat16, use_safetensors=True
     )
     pipe.enable_xformers_memory_efficient_attention()
     pipe.to("cuda")
