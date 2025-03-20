@@ -99,7 +99,7 @@ def download_images_from_s3(local_path, subfolder):
 def upload_lora_to_s3(local_path, s3_subfolder):
     for file in os.listdir(local_path):
         s3_client.upload_file(os.path.join(local_path, file), S3_BUCKET, f"{S3_WEIGHTS_PATH}/{s3_subfolder}/{file}")
-
+# Train LoRA correctly
 def train_lora(dataset_path, output_path, steps, lr):
     logger.info("🚀 Starting LoRA fine-tuning...")
 
@@ -129,7 +129,7 @@ def train_lora(dataset_path, output_path, steps, lr):
 
     optimizer = torch.optim.AdamW(unet.parameters(), lr=lr)
 
-    # ✅ Load VAE model correctly
+    # ✅ Load VAE model correctly using AutoencoderKL
     logger.info("🔍 Loading VAE model...")
     vae_path = os.path.join(model_dir, "vae")
     
@@ -137,7 +137,7 @@ def train_lora(dataset_path, output_path, steps, lr):
         logger.error(f"❌ VAE model not found at {vae_path}")
         raise ValueError(f"VAE model not found at {vae_path}")
 
-    vae = UNet2DConditionModel.from_pretrained(vae_path).to("cuda")
+    vae = AutoencoderKL.from_pretrained(vae_path).to("cuda")
     logger.info("✅ VAE model loaded successfully.")
 
     # ✅ Load text_encoder_2 (most likely correct encoder for this model)
@@ -188,6 +188,7 @@ def train_lora(dataset_path, output_path, steps, lr):
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
 
+    
 # Request Models
 class TrainRequest(BaseModel):
     subfolder: str
