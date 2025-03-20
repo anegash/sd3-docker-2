@@ -15,6 +15,8 @@ from pydantic import BaseModel
 import torchvision.transforms as transforms
 from huggingface_hub import snapshot_download
 
+from diffusers.schedulers.scheduling_utils import SchedulerMixin 
+
 import json
 
 logging.basicConfig(
@@ -163,17 +165,23 @@ def train_lora(dataset_path, output_path, steps, lr):
 
         with torch.no_grad():
             logger.info(f"🔄 Step {step}: Generating latents...")
-            # **✅ FIX: Convert images to float32 before passing to VAE**
+            # ✅ FIX: Convert images to float32 before passing to VAE
             latents = vae.encode(images.to(torch.float32)).latent_dist.sample() * vae.config.scaling_factor
             noise = torch.randn_like(latents)
             timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda").long()
-            noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
 
-            logger.info("🔄 Step {}: Generating text embeddings...".format(step))
+            # ✅ FIX: Ensure noise is added correctly based on scheduler type
+            if isinstance(pipe.scheduler, SchedulerMixin):
+                noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
+            else:
+                logger.warning(f"⚠️ Scheduler '{type(pipe.scheduler).__name__}' does not support add_noise. Using fallback.")
+                noisy_latents = latents + noise  # Fallback: Simple noise addition
+
+            logger.info(f"🔄 Step {step}: Generating text embeddings...")
             encoder_states = text_encoder(tokens)[0]  # Use text_encoder_2
 
         optimizer.zero_grad()
-        logger.info("🔄 Step {}: Forward pass through UNet...".format(step))
+        logger.info(f"🔄 Step {step}: Forward pass through UNet...")
         pred_noise = unet(noisy_latents, timesteps, encoder_states).sample
 
         loss = torch.nn.functional.mse_loss(pred_noise, noise)
@@ -190,8 +198,6 @@ def train_lora(dataset_path, output_path, steps, lr):
     logger.info(f"📤 Uploading LoRA model to S3: {output_path}")
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
-    
-
 # Request Models
 class TrainRequest(BaseModel):
     subfolder: str
