@@ -166,8 +166,17 @@ def train_lora(dataset_path, output_path, steps, lr):
 
         with torch.no_grad():
             logger.info(f"🔄 Step {step}: Generating latents...")
+            
             # ✅ FIX: Convert images to float32 before passing to VAE
-            latents = vae.encode(images.to(torch.float32)).latent_dist.sample() * vae.config.scaling_factor
+            latents = vae.encode(images.to(torch.float32)).latent_dist.sample()
+            
+            # ✅ Ensure latents have 4 channels (SD3 models might use 16)
+            if latents.shape[1] != 4:
+                logger.warning(f"⚠️ Latent space mismatch: expected 4 channels, got {latents.shape[1]}")
+                latents = latents[:, :4, :, :]  # Take first 4 channels
+
+            latents = latents * vae.config.scaling_factor  # Apply correct scaling
+            
             noise = torch.randn_like(latents)
             timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda").long()
 
@@ -179,6 +188,12 @@ def train_lora(dataset_path, output_path, steps, lr):
 
         optimizer.zero_grad()
         logger.info(f"🔄 Step {step}: Forward pass through UNet...")
+        
+        # ✅ Ensure the UNet receives a correctly shaped latent space
+        if noisy_latents.shape[1] != 4:
+            logger.error(f"❌ UNet input shape mismatch: expected 4 channels, got {noisy_latents.shape[1]}")
+            raise ValueError(f"UNet input shape mismatch: expected 4 channels, got {noisy_latents.shape[1]}")
+
         pred_noise = unet(noisy_latents, timesteps, encoder_states).sample
 
         loss = torch.nn.functional.mse_loss(pred_noise, noise)
@@ -196,8 +211,9 @@ def train_lora(dataset_path, output_path, steps, lr):
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
 
-
     
+
+
 # Request Models
 class TrainRequest(BaseModel):
     subfolder: str
