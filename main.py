@@ -98,57 +98,94 @@ def upload_lora_to_s3(local_path, s3_subfolder):
     for file in os.listdir(local_path):
         s3_client.upload_file(os.path.join(local_path, file), S3_BUCKET, f"{S3_WEIGHTS_PATH}/{s3_subfolder}/{file}")
 
-# Train LoRA correctly
 def train_lora(dataset_path, output_path, steps, lr):
+    logger.info("🚀 Starting LoRA fine-tuning...")
+
+    # ✅ Load Dataset
+    logger.info(f"📂 Loading dataset from: {dataset_path}")
     dataset = ImageDataset(dataset_path, tokenizer)
     loader = DataLoader(dataset, batch_size=2, shuffle=True)
+    logger.info(f"✅ Dataset loaded. Total samples: {len(dataset)}")
 
     config = LoraConfig(r=4, lora_alpha=16, target_modules=["to_q", "to_v"])
 
-    # ✅ Load UNet using model_index.json instead of missing unet/
+    # ✅ Load UNet using model_index.json (since config.json is missing)
+    logger.info("🔍 Loading UNet model from model_index.json...")
+    config_path = os.path.join(model_dir, "model_index.json")
+    
+    if not os.path.exists(config_path):
+        logger.error(f"❌ UNet config not found: {config_path}")
+        raise ValueError(f"UNet config not found: {config_path}")
+
+    with open(config_path, "r") as f:
+        model_config = json.load(f)
+
     unet = get_peft_model(
-        UNet2DConditionModel.from_pretrained(model_dir, config="model_index.json").to("cuda"), config
+        UNet2DConditionModel.from_config(model_config).to("cuda"), config
     )
+    logger.info("✅ UNet model loaded successfully.")
 
     optimizer = torch.optim.AdamW(unet.parameters(), lr=lr)
 
     # ✅ Load VAE model correctly
+    logger.info("🔍 Loading VAE model...")
     vae_path = os.path.join(model_dir, "vae")
+    
+    if not os.path.exists(vae_path):
+        logger.error(f"❌ VAE model not found at {vae_path}")
+        raise ValueError(f"VAE model not found at {vae_path}")
+
     vae = UNet2DConditionModel.from_pretrained(vae_path).to("cuda")
+    logger.info("✅ VAE model loaded successfully.")
 
-    # ✅ Load text_encoder_2
+    # ✅ Load text_encoder_2 (most likely correct encoder for this model)
+    logger.info("🔍 Loading text encoder...")
     text_encoder_path = os.path.join(model_dir, "text_encoder_2")
-    text_encoder = CLIPTextModel.from_pretrained(text_encoder_path).to("cuda")
+    
+    if not os.path.exists(text_encoder_path):
+        logger.error(f"❌ Text encoder not found at {text_encoder_path}")
+        raise ValueError(f"Text encoder not found at {text_encoder_path}")
 
+    text_encoder = CLIPTextModel.from_pretrained(text_encoder_path).to("cuda")
+    logger.info("✅ Text encoder loaded successfully.")
+
+    # ✅ Training loop
+    logger.info(f"🛠️ Training LoRA for {steps} steps with LR={lr}")
     for step, (images, tokens) in enumerate(loader):
         if step >= steps:
             break
+
         images, tokens = images.cuda(), tokens.cuda()
 
         with torch.no_grad():
-            # ✅ Ensure images are cast to float16
+            logger.info(f"🔄 Step {step}: Generating latents...")
             latents = vae.encode(images.to(torch.float16)).latent_dist.sample() * vae.config.scaling_factor
             noise = torch.randn_like(latents)
-            timesteps = torch.randint(
-                0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda"
-            ).long()
+            timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda").long()
             noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
 
-            encoder_states = text_encoder(tokens)[0]  # ✅ Use text_encoder_2
+            logger.info("🔄 Step {}: Generating text embeddings...".format(step))
+            encoder_states = text_encoder(tokens)[0]  # Use text_encoder_2
 
         optimizer.zero_grad()
+        logger.info("🔄 Step {}: Forward pass through UNet...".format(step))
         pred_noise = unet(noisy_latents, timesteps, encoder_states).sample
+
         loss = torch.nn.functional.mse_loss(pred_noise, noise)
         loss.backward()
         optimizer.step()
 
         if step % 100 == 0:
-            logger.info(f"Step {step}/{steps} - Loss: {loss.item()}")
+            logger.info(f"📌 Step {step}/{steps} - Loss: {loss.item():.6f}")
 
+    logger.info(f"✅ LoRA fine-tuning complete! Saving model to {output_path}...")
     unet.save_pretrained(output_path)
-    upload_lora_to_s3(output_path, os.path.basename(output_path))
 
-    
+    # ✅ Upload trained model to S3
+    logger.info(f"📤 Uploading LoRA model to S3: {output_path}")
+    upload_lora_to_s3(output_path, os.path.basename(output_path))
+    logger.info("✅ LoRA model uploaded successfully!")
+
 # Request Models
 class TrainRequest(BaseModel):
     subfolder: str
