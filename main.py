@@ -53,7 +53,6 @@ S3_WEIGHTS_PATH = "lora_models/"
 # Model Paths
 model_id = "stabilityai/stable-diffusion-3.5-large"
 model_dir = "/workspace/models"
-# model_path = os.path.join(model_dir, model_id.replace("/", "_"))
 lora_model_path = "/workspace/lora_models"
 os.makedirs(lora_model_path, exist_ok=True)
 
@@ -68,7 +67,7 @@ def load_model():
         raise ValueError("HuggingFace token not found! Set HF_TOKEN environment variable.")
 
     model_dir = snapshot_download(
-        repo_id="stabilityai/stable-diffusion-3.5-large",
+        repo_id=model_id,
         local_dir=model_dir,  # Persistent volume mount point
         token=HF_TOKEN,
         local_dir_use_symlinks=False,
@@ -112,7 +111,7 @@ class ImageDataset(Dataset):
     def __init__(self, image_folder):
         self.image_folder = image_folder
         self.image_files = [f for f in os.listdir(image_folder) if f.endswith((".png", ".jpg", ".jpeg"))]
-        self.tokenizer = CLIPTokenizer.from_pretrained(model_path)
+        self.tokenizer = CLIPTokenizer.from_pretrained(model_dir)
         self.captions = ["A portrait of a child."] * len(self.image_files)
 
     def __len__(self):
@@ -131,8 +130,8 @@ def train_lora(dataset_path, output_lora_path, steps=1000, lr=1e-4):
     logging.info("🚀 Starting LoRA fine-tuning...")
     
     # Load base model components
-    unet = UNet2DConditionModel.from_pretrained(model_path, subfolder="unet")
-    text_encoder = CLIPTextModel.from_pretrained(model_path, subfolder="text_encoder")
+    unet = UNet2DConditionModel.from_pretrained(model_dir, subfolder="unet")
+    text_encoder = CLIPTextModel.from_pretrained(model_dir, subfolder="text_encoder")
 
     # Load dataset
     dataset = ImageDataset(dataset_path)
