@@ -110,6 +110,21 @@ def upload_lora_to_s3(local_path, s3_subfolder):
     for file in os.listdir(local_path):
         s3_client.upload_file(os.path.join(local_path, file), S3_BUCKET, f"{S3_WEIGHTS_PATH}/{s3_subfolder}/{file}")
 
+
+def add_special_token_to_tokenizer(special_token):
+    global tokenizer, text_encoder
+
+    if special_token not in tokenizer.get_vocab():
+        logger.info(f"➕ Adding special token '{special_token}' to tokenizer...")
+        
+        # Add new token
+        tokenizer.add_tokens([special_token])
+
+        # Resize the text encoder's embeddings
+        text_encoder.resize_token_embeddings(len(tokenizer))
+        
+        logger.info(f"✅ Special token '{special_token}' added successfully!")
+
 # Train LoRA correctly
 # Updated training function with an extra parameter "child_token"
 def train_lora(dataset_path, output_path, steps, lr, child_token):
@@ -117,11 +132,7 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
 
     logger.info("🚀 Starting LoRA fine-tuning...")
 
-    # Ensure the special token is in the tokenizer
-    if child_token not in tokenizer.get_vocab():
-        tokenizer.add_tokens(child_token)
-        text_encoder.resize_token_embeddings(len(tokenizer))  # FIXED: Ensures `text_encoder` is available
-        logger.info(f"✅ Added special token {child_token} to the tokenizer.")
+    add_special_token_to_tokenizer(child_token)
 
     # ✅ Load Dataset with the child's special token
     logger.info(f"📂 Loading dataset from: {dataset_path}")
