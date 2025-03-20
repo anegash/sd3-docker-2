@@ -109,30 +109,44 @@ def download_images_from_s3(local_path, subfolder):
 def upload_lora_to_s3(local_path, s3_subfolder):
     for file in os.listdir(local_path):
         s3_client.upload_file(os.path.join(local_path, file), S3_BUCKET, f"{S3_WEIGHTS_PATH}/{s3_subfolder}/{file}")
-
-
 def add_special_token_to_tokenizer(special_token):
     global tokenizer, text_encoder
 
     if special_token not in tokenizer.get_vocab():
         logger.info(f"➕ Adding special token '{special_token}' to tokenizer...")
-        
-        # Add new token
+
+        # Add new token to tokenizer
         tokenizer.add_tokens([special_token])
 
         # Resize the text encoder's embeddings
-        text_encoder.resize_token_embeddings(len(tokenizer))
-        
-        logger.info(f"✅ Special token '{special_token}' added successfully!")
+        if text_encoder is not None:
+            text_encoder.resize_token_embeddings(len(tokenizer))
+            logger.info(f"✅ Special token '{special_token}' added and text encoder resized.")
+        else:
+            logger.warning(f"⚠️ Text encoder is None, cannot resize embeddings!")
+
 
 # Train LoRA correctly
 # Updated training function with an extra parameter "child_token"
 def train_lora(dataset_path, output_path, steps, lr, child_token):
-    global text_encoder  # Ensure global access
+    global tokenizer, text_encoder  # Ensure global access
 
     logger.info("🚀 Starting LoRA fine-tuning...")
 
+    # ✅ Load text_encoder before adding special tokens
+    text_encoder_path = os.path.join(model_dir, "text_encoder_2")
+    if not os.path.exists(text_encoder_path):
+        logger.error(f"❌ Text encoder not found at {text_encoder_path}")
+        raise ValueError(f"Text encoder not found at {text_encoder_path}")
+
+    text_encoder = CLIPTextModel.from_pretrained(text_encoder_path).to("cuda")
+    logger.info("✅ Text encoder loaded successfully.")
+
+    # ✅ Ensure the special token is added before dataset processing
     add_special_token_to_tokenizer(child_token)
+
+    vocab_size = len(tokenizer)
+    logger.info(f"📏 Tokenizer Vocabulary Size: {vocab_size}")
 
     # ✅ Load Dataset with the child's special token
     logger.info(f"📂 Loading dataset from: {dataset_path}")
@@ -150,6 +164,7 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
         raise ValueError(f"UNet config not found: {config_path}")
     with open(config_path, "r") as f:
         model_config = json.load(f)
+
     unet = get_peft_model(
         UNet2DConditionModel.from_config(model_config).to("cuda"), config
     )
@@ -165,15 +180,6 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
         raise ValueError(f"VAE model not found at {vae_path}")
     vae = AutoencoderKL.from_pretrained(vae_path).to("cuda")
     logger.info("✅ VAE model loaded successfully.")
-
-    # ✅ Load text_encoder_2
-    logger.info("🔍 Loading text encoder...")
-    text_encoder_path = os.path.join(model_dir, "text_encoder_2")
-    if not os.path.exists(text_encoder_path):
-        logger.error(f"❌ Text encoder not found at {text_encoder_path}")
-        raise ValueError(f"Text encoder not found at {text_encoder_path}")
-    text_encoder = CLIPTextModel.from_pretrained(text_encoder_path).to("cuda")
-    logger.info("✅ Text encoder loaded successfully.")
 
     # ✅ Training loop
     logger.info(f"🛠️ Training LoRA for {steps} steps with LR={lr}")
@@ -202,6 +208,12 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
 
             logger.info(f"📝 Tokenized caption for training: {tokens}")
             logger.info(f"🔢 Token indices range: {tokens.min().item()} - {tokens.max().item()}")
+
+            # ✅ Check for out-of-bounds tokens before passing to encoder
+            if tokens.max().item() >= vocab_size:
+                logger.error(f"❌ Invalid token index found! Max index: {tokens.max().item()}, Vocabulary size: {vocab_size}")
+                raise ValueError(f"Token index out of bounds. Ensure `{child_token}` is added properly!")
+
             encoder_states = text_encoder(tokens)[0]
 
         optimizer.zero_grad()
@@ -225,7 +237,6 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
     logger.info(f"📤 Uploading LoRA model to S3: {output_path}")
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
-
 
 # Updated Train Request Model to include the child's name
 class TrainRequest(BaseModel):
