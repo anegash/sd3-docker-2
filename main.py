@@ -104,8 +104,21 @@ def train_lora(dataset_path, output_path, steps, lr):
     loader = DataLoader(dataset, batch_size=2, shuffle=True)
 
     config = LoraConfig(r=4, lora_alpha=16, target_modules=["to_q", "to_v"])
-    unet = get_peft_model(UNet2DConditionModel.from_pretrained(model_dir).to("cuda"), config)
+
+    # ✅ Load UNet using model_index.json instead of missing unet/
+    unet = get_peft_model(
+        UNet2DConditionModel.from_pretrained(model_dir, config="model_index.json").to("cuda"), config
+    )
+
     optimizer = torch.optim.AdamW(unet.parameters(), lr=lr)
+
+    # ✅ Load VAE model correctly
+    vae_path = os.path.join(model_dir, "vae")
+    vae = UNet2DConditionModel.from_pretrained(vae_path).to("cuda")
+
+    # ✅ Load text_encoder_2
+    text_encoder_path = os.path.join(model_dir, "text_encoder_2")
+    text_encoder = CLIPTextModel.from_pretrained(text_encoder_path).to("cuda")
 
     for step, (images, tokens) in enumerate(loader):
         if step >= steps:
@@ -113,11 +126,15 @@ def train_lora(dataset_path, output_path, steps, lr):
         images, tokens = images.cuda(), tokens.cuda()
 
         with torch.no_grad():
-            latents = vae.encode(images.half()).latent_dist.sample() * vae.config.scaling_factor
+            # ✅ Ensure images are cast to float16
+            latents = vae.encode(images.to(torch.float16)).latent_dist.sample() * vae.config.scaling_factor
             noise = torch.randn_like(latents)
-            timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda").long()
+            timesteps = torch.randint(
+                0, pipe.scheduler.config.num_train_timesteps, (latents.size(0),), device="cuda"
+            ).long()
             noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
-            encoder_states = text_encoder(tokens)[0]
+
+            encoder_states = text_encoder(tokens)[0]  # ✅ Use text_encoder_2
 
         optimizer.zero_grad()
         pred_noise = unet(noisy_latents, timesteps, encoder_states).sample
@@ -131,6 +148,7 @@ def train_lora(dataset_path, output_path, steps, lr):
     unet.save_pretrained(output_path)
     upload_lora_to_s3(output_path, os.path.basename(output_path))
 
+    
 # Request Models
 class TrainRequest(BaseModel):
     subfolder: str
