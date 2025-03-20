@@ -54,24 +54,28 @@ s3_client = boto3.client(
     region_name=AWS_REGION
 )
 
-# Initialize model
-try:
-    logger.info("🔥 Initializing Stable Diffusion API...")
-    pipe = StableDiffusion3Pipeline.from_pretrained(
-        model_path, torch_dtype=torch.float16, variant="fp16"
+# Updated main.py snippet using persistent storage
+@app.on_event("startup")
+def load_model():
+    global pipe
+    HF_TOKEN = os.getenv("HF_TOKEN")
+    if not HF_TOKEN:
+        raise ValueError("HuggingFace token not found! Set HF_TOKEN environment variable.")
+
+    model_path = snapshot_download(
+        repo_id="stabilityai/stable-diffusion-3.5-large",
+        local_dir="/runpod-volume/models",  # Persistent volume mount point
+        token=HF_TOKEN,
+        local_dir_use_symlinks=False,
+        resume_download=True
     )
 
-    if torch.cuda.is_available():
-        pipe = pipe.to("cuda")
-        logger.info("🚀 Running on CUDA")
-    else:
-        pipe = pipe.to("cpu")
-        logger.warning("⚠️ Running on CPU (slow performance).")
+    pipe = StableDiffusion3Pipeline.from_pretrained(
+        model_path, torch_dtype=torch.bfloat16, use_safetensors=True
+    )
+    pipe.enable_xformers_memory_efficient_attention()
+    pipe.to("cuda")
 
-except Exception as e:
-    logger.error("🔥 Error loading Stable Diffusion model: %s", str(e))
-    logger.error(traceback.format_exc())
-    pipe = None  # Prevent API from running with an unloaded model
 
 # Helper function to download images from S3
 def download_images_from_s3(local_path: str, subfolder: str):
