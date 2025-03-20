@@ -211,7 +211,7 @@ def train_lora(dataset_path, output_path, steps, lr):
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
 
-    
+
 
 
 # Request Models
@@ -239,15 +239,40 @@ class GenerateRequest(BaseModel):
 
 @app.post("/generate")
 def generate_image(req: GenerateRequest):
+    logger.info("🚀 Received image generation request.")
+    logger.info(f"📝 Prompt: {req.prompt}")
+    logger.info(f"🎚️ Inference Steps: {req.steps}, Guidance Scale: {req.guidance}")
+    
     if req.lora_model_name:
-        pipe.load_lora_weights(os.path.join(lora_model_path, req.lora_model_name))
+        lora_path = os.path.join(lora_model_path, req.lora_model_name)
+        logger.info(f"🔄 Loading LoRA model: {req.lora_model_name} from {lora_path}")
+        
+        try:
+            pipe.load_lora_weights(lora_path)
+            logger.info("✅ LoRA model loaded successfully.")
+        except Exception as e:
+            logger.error(f"❌ Failed to load LoRA model: {e}")
+            return {"error": f"Failed to load LoRA model: {e}"}
 
-    image = pipe(req.prompt, num_inference_steps=req.steps, guidance_scale=req.guidance).images[0]
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    try:
+        logger.info("🎨 Generating image...")
+        image = pipe(req.prompt, num_inference_steps=req.steps, guidance_scale=req.guidance).images[0]
+        logger.info("✅ Image generation complete.")
 
-    return {"image": img_str}
+        # Convert image to Base64
+        logger.info("📤 Encoding image to Base64 format...")
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        logger.info("✅ Image successfully encoded and ready for response.")
+        return {"image": img_str}
+    
+    except Exception as e:
+        logger.error(f"❌ Image generation failed: {e}")
+        return {"error": f"Image generation failed: {e}"}
+    
+    
 
 @app.get("/")
 def health_check():
