@@ -105,17 +105,17 @@ def upload_lora_to_s3(local_path, s3_subfolder):
     for file in os.listdir(local_path):
         s3_client.upload_file(os.path.join(local_path, file), S3_BUCKET, f"{S3_WEIGHTS_PATH}/{s3_subfolder}/{file}")
 
-
-
 # Train LoRA correctly
 # Updated training function with an extra parameter "child_token"
 def train_lora(dataset_path, output_path, steps, lr, child_token):
+    global text_encoder  # Ensure global access
+
     logger.info("🚀 Starting LoRA fine-tuning...")
 
     # Ensure the special token is in the tokenizer
     if child_token not in tokenizer.get_vocab():
         tokenizer.add_tokens(child_token)
-        text_encoder.resize_token_embeddings(len(tokenizer))
+        text_encoder.resize_token_embeddings(len(tokenizer))  # FIXED: Ensures `text_encoder` is available
         logger.info(f"✅ Added special token {child_token} to the tokenizer.")
 
     # ✅ Load Dataset with the child's special token
@@ -206,6 +206,7 @@ def train_lora(dataset_path, output_path, steps, lr, child_token):
     logger.info(f"📤 Uploading LoRA model to S3: {output_path}")
     upload_lora_to_s3(output_path, os.path.basename(output_path))
     logger.info("✅ LoRA model uploaded successfully!")
+    
 
 # Updated Train Request Model to include the child's name
 class TrainRequest(BaseModel):
