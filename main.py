@@ -67,7 +67,7 @@ def load_model():
 
     model_path = snapshot_download(
         repo_id="stabilityai/stable-diffusion-3.5-large",
-        local_dir="/runpod-volume/models",  # Persistent volume mount point
+        local_dir=model_dir,  # Persistent volume mount point
         token=HF_TOKEN,
         local_dir_use_symlinks=False,
         resume_download=True
