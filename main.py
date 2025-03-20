@@ -18,6 +18,9 @@ from pydantic import BaseModel
 
 import torchvision.transforms as transforms
 
+from huggingface_hub import snapshot_download
+
+
 # Initialize logging
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(module)s | %(message)s",
