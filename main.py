@@ -136,8 +136,17 @@ def train_lora(dataset_path, output_lora_path, steps=1000, lr=1e-4):
     logging.info("🚀 Starting LoRA fine-tuning...")
     
     # Load base model components
-    unet = UNet2DConditionModel.from_pretrained(model_dir, subfolder="unet")
-    text_encoder = CLIPTextModel.from_pretrained(model_dir, subfolder="text_encoder")
+    unet_path = os.path.join(model_dir, "sd3.5_large.safetensors")
+    text_encoder_path = os.path.join(model_dir, "text_encoder")
+
+    if not os.path.exists(unet_path):
+        raise ValueError(f"❌ UNet model file not found: {unet_path}")
+
+    if not os.path.exists(text_encoder_path):
+        raise ValueError(f"❌ Text encoder path not found: {text_encoder_path}")
+
+    unet = UNet2DConditionModel.from_pretrained(model_dir)  # No subfolder
+    text_encoder = CLIPTextModel.from_pretrained(text_encoder_path)
 
     # Load dataset
     dataset = ImageDataset(dataset_path)
